@@ -1,0 +1,21 @@
+# 构建产物
+frontend/dist/
+frontend/node_modules/
+app/node_modules/
+app/src-tauri/target/
+app/src-tauri/gen/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# 运行期数据与依赖（体积大，不入库）
+engine/.venv/
+engine/models/
+engine/**/.cache/
+data/
+
+# 本地测试与临时目录
+_scratch/
+*.log
+settings.json

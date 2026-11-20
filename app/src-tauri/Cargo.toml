@@ -1,0 +1,41 @@
+[package]
+name = "voicetrace"
+version = "1.0.0"
+description = "声迹 VoiceTrace - 本地视频转录工作台"
+authors = ["VoiceTrace"]
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "voicetrace_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "voicetrace"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+# Windows GNU 下测试二进制不会自动带上 Common-Controls v6 清单，
+# 缺少时进程会在加载 comctl32 5.82 时 0xc0000139；这里只给 test 目标补清单。
+embed-resource = "3"
+
+[features]
+# 生产构建必须启用：没有它 tauri 会按 dev 模式去连 devUrl，而不是嵌入前端产物。
+# `pnpm tauri build` 会自动启用；直接 cargo build 时需显式 --features custom-protocol。
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+codegen-units = 1
+strip = true
+# 不要 panic = "abort"：setup 失败会直接 __fastfail（0xC0000409）闪退，
+# 保留 unwind 才能走到错误弹窗并写日志。
