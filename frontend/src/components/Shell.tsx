@@ -61,14 +61,21 @@ export function Shell({ onImport }: { onImport: () => void }) {
         !system.models_present.vad ||
         !system.models_present.punc),
   );
+  const runtimeMissing = system?.runtime_setup
+    ? !system.runtime_setup.torch_ready
+    : false;
+  const envMissing = modelsMissing || runtimeMissing;
   const warnedRef = useRef(false);
 
-  // 首次发现模型缺失时提示一次；之后由设置页的小红点持续提醒。
+  // 首次发现运行环境缺失时提示一次；之后由设置页的小红点持续提醒。
   useEffect(() => {
-    if (!modelsMissing || warnedRef.current) return;
+    if (!envMissing || warnedRef.current) return;
     warnedRef.current = true;
-    toast("warn", "离线模型尚未下载，请到「设置 → 离线模型」下载后再开始转录。");
-  }, [modelsMissing, toast]);
+    toast(
+      "warn",
+      "运行环境未就绪：请到「设置」安装推理组件并下载离线模型后再开始转录。",
+    );
+  }, [envMissing, toast]);
 
   const goHome = () => {
     setView("workspace");
@@ -121,8 +128,8 @@ export function Shell({ onImport }: { onImport: () => void }) {
             <strong>设置</strong>
             <em>引擎、字幕与存储</em>
           </span>
-          {modelsMissing ? (
-            <span className="app-nav-badge tabular" title="离线模型未下载">
+          {envMissing ? (
+            <span className="app-nav-badge tabular" title="运行环境未就绪">
               !
             </span>
           ) : null}

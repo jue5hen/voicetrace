@@ -67,6 +67,21 @@ export interface ModelDownloadStatus {
   models: Record<string, ModelDownloadItem>;
 }
 
+export type RuntimeSetupState = "idle" | "running" | "done" | "error" | "canceled";
+
+/** 按需安装的 CUDA PyTorch 运行时状态（安装包不含 torch，首次使用需下载）。 */
+export interface RuntimeSetupStatus {
+  state: RuntimeSetupState;
+  /** idle | download | install | done */
+  phase: string;
+  torch_ready: boolean;
+  downloaded_bytes: number;
+  total_bytes: number;
+  progress: number;
+  error: string | null;
+  supported: boolean;
+}
+
 /** POST /api/jobs 中被引擎拒绝的条目。 */
 export interface SkippedImport {
   path: string;
@@ -235,6 +250,8 @@ export interface SystemInfo {
   models_present?: ModelsPresent;
   /** 离线模型下载状态（1.0.0 起）。 */
   models_download?: ModelDownloadStatus;
+  /** 推理运行时安装状态（1.0.0 起）。 */
+  runtime_setup?: RuntimeSetupStatus;
   /** 模型加载失败原因（model_state === "failed" 时有效）。 */
   error?: string | null;
   /** 引擎采样率。 */

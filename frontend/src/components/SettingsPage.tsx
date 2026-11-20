@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { ModelDownloadStatus, Settings, SystemInfo } from "../types";
+import type { ModelDownloadStatus, RuntimeSetupStatus, Settings, SystemInfo } from "../types";
 import { DEFAULT_SETTINGS, useApp } from "../lib/store";
 import { api } from "../lib/engine";
 import { fmtBytes } from "../lib/format";
@@ -132,6 +132,174 @@ const MODEL_FALLBACK: Record<string, string> = {
   vad: "语音活动检测模型",
   punc: "标点模型",
 };
+
+/** CUDA 推理运行时：安装包不带 torch，首次使用需下载并安装。 */
+function RuntimeSection() {
+  const { system, toast } = useApp();
+  const [status, setStatus] = useState<RuntimeSetupStatus | null>(
+    system?.runtime_setup ?? null,
+  );
+  const [starting, setStarting] = useState(false);
+  const [mirror, setMirror] = useState(
+    () => window.localStorage.getItem("vt.runtimeMirror") === "1",
+  );
+  const [proxy, setProxy] = useState(
+    () => window.localStorage.getItem("vt.runtimeProxy") ?? "",
+  );
+
+  useEffect(() => {
+    if (system?.runtime_setup) setStatus(system.runtime_setup);
+  }, [system]);
+
+  const running = status?.state === "running";
+
+  useEffect(() => {
+    if (!running) return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void api
+        .runtime()
+        .then((next) => {
+          if (!cancelled) setStatus(next);
+        })
+        .catch(() => {
+          /* 引擎短暂不可用时保留上次进度 */
+        });
+    }, 1500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [running]);
+
+  const ready = status?.torch_ready === true;
+  const installing = status?.phase === "install";
+  const pct = Math.round((status?.progress ?? 0) * 100);
+  const approxTotal = status?.total_bytes || 2_726_626_124;
+  const supported = status?.supported !== false;
+
+  const start = async () => {
+    if (starting || running) return;
+    window.localStorage.setItem("vt.runtimeMirror", mirror ? "1" : "0");
+    window.localStorage.setItem("vt.runtimeProxy", proxy.trim());
+    setStarting(true);
+    try {
+      const next = await api.installRuntime({ proxy: proxy.trim(), mirror });
+      setStatus(next);
+      toast("info", "推理组件开始下载，完成后建议重启引擎再转录。");
+    } catch (err) {
+      toast("error", err instanceof Error ? err.message : "推理组件安装启动失败");
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const cancel = async () => {
+    try {
+      setStatus(await api.cancelRuntime());
+    } catch {
+      toast("error", "取消安装失败，请稍后重试。");
+    }
+  };
+
+  return (
+    <Section
+      icon="cpu"
+      title="推理组件"
+      desc="CUDA 版 PyTorch，安装后才能开始转录；安装包不内置以控制体积"
+    >
+      <div className="model-list">
+        <div className={`model-row ${ready ? "is-ready" : ""}`}>
+          <span className="model-row-name">
+            {ready ? (
+              <Icon name="checkCircle" size={14} />
+            ) : running ? (
+              <span className="spinner tiny" />
+            ) : (
+              <Icon name="download" size={14} />
+            )}
+            PyTorch 2.1.0 + CUDA 11.8
+          </span>
+          <span className="model-row-state">
+            {ready ? "已安装" : running ? (installing ? "安装中" : "下载中") : "未安装"}
+          </span>
+        </div>
+      </div>
+
+      {running ? (
+        <div className="model-progress">
+          <div className="model-progress-head">
+            <span>{installing ? "正在安装到运行时目录…" : "正在下载 CUDA 运行时"}</span>
+            <span className="tabular">{installing ? "" : `${pct}%`}</span>
+          </div>
+          <div className="model-track">
+            <div
+              className="model-fill"
+              style={{ width: `${installing ? 100 : Math.max(2, pct)}%` }}
+            />
+          </div>
+          <div className="model-progress-meta">
+            <span className="tabular">
+              {installing
+                ? "安装期间请勿关闭应用"
+                : `${fmtBytes(status?.downloaded_bytes ?? 0)} / ${fmtBytes(status?.total_bytes ?? 0)}`}
+            </span>
+            <button type="button" className="text-btn" onClick={() => void cancel()}>
+              取消
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="model-actions">
+          <button
+            type="button"
+            className="btn primary"
+            disabled={starting || ready || !supported}
+            onClick={() => void start()}
+          >
+            <Icon name="download" size={14} />
+            {ready
+              ? "推理组件已安装"
+              : `下载并安装（约 ${fmtBytes(approxTotal)}）`}
+          </button>
+          {status?.error ? (
+            <span className="model-error" title={status.error}>
+              {status.error}
+            </span>
+          ) : null}
+        </div>
+      )}
+
+      {supported ? (
+        <div className="model-advanced">
+          <label className="model-check">
+            <input
+              type="checkbox"
+              checked={mirror}
+              disabled={running}
+              onChange={(e) => setMirror(e.target.checked)}
+            />
+            优先使用阿里云镜像
+          </label>
+          <input
+            className="model-proxy"
+            value={proxy}
+            disabled={running}
+            spellCheck={false}
+            placeholder="代理（可选），如 http://127.0.0.1:7890"
+            onChange={(e) => setProxy(e.target.value)}
+          />
+        </div>
+      ) : (
+        <p className="model-hint">源码开发模式：请直接在 venv 中执行 pip install -r requirements.txt。</p>
+      )}
+
+      <p className="model-hint">
+        下载源为 PyTorch 官方仓库（可切换阿里云镜像），安装后建议在启动页点一次「重启引擎」。
+      </p>
+    </Section>
+  );
+}
 
 /** 离线模型：一键从 Hugging Face 下载 FireRedASR2S 开源权重。 */
 function ModelSection() {
@@ -386,6 +554,7 @@ export function SettingsPage() {
       </header>
 
       <div className="settings-grid">
+        <RuntimeSection />
         <ModelSection />
 
         <Section

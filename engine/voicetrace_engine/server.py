@@ -37,6 +37,7 @@ from .config import VERSION, Paths, load_settings, resolve_paths, save_settings
 from .downloader import DownloadManager
 from .media import MEDIA_EXTS, probe
 from .model_download import is_model_ready
+from .runtime_manager import RuntimeManager
 from .pipeline import OOM_DOWNGRADE_MESSAGE, OOM_MESSAGE, is_out_of_memory
 from .runtime import Runtime, probe_gpu
 from .segmentation import SEG_VERSION, segment_transcript
@@ -286,6 +287,7 @@ class State:
             self.paths.data_dir,
             engine_root=self.paths.engine_root,
         )
+        self.runtime_setup = RuntimeManager(self.paths.engine_root, self.paths.data_dir)
         self.settings = load_settings(self.paths.settings_path)
         self.store = Store(self.paths.db_path)
         self.store.reset_stale()
@@ -839,6 +841,13 @@ class ModelDownloadBody(BaseModel):
     endpoint: str | None = None
 
 
+class RuntimeInstallBody(BaseModel):
+    """POST /api/runtime/install 的请求体（CUDA PyTorch 运行时）。"""
+
+    proxy: str | None = None
+    mirror: bool = False
+
+
 # ---------------------------------------------------------------- app
 
 
@@ -934,6 +943,7 @@ def build_app(state: State) -> FastAPI:
             "model_state": model_state(state.runtime),
             "models_present": models_present,
             "models_download": state.models.status(),
+            "runtime_setup": state.runtime_setup.status(),
             "error": state.runtime.error,
             "device": device,
             "sample_rate": SAMPLE_RATE,
@@ -979,6 +989,22 @@ def build_app(state: State) -> FastAPI:
     @app.post("/api/models/cancel")
     def models_cancel():
         return state.models.cancel()
+
+    @app.get("/api/runtime")
+    def runtime_status():
+        return state.runtime_setup.status()
+
+    @app.post("/api/runtime/install")
+    def runtime_install(body: RuntimeInstallBody | None = None):
+        body = body or RuntimeInstallBody()
+        return state.runtime_setup.start(
+            proxy=clean_url(body.proxy),
+            mirror=body.mirror,
+        )
+
+    @app.post("/api/runtime/cancel")
+    def runtime_cancel():
+        return state.runtime_setup.cancel()
 
     @app.get("/api/settings")
     def get_settings():

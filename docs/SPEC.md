@@ -63,6 +63,9 @@ token 比较使用常量时间比较（`hmac.compare_digest`）。CORS 只允许
 | GET | /models | 离线模型下载状态（见 §3.7） |
 | POST | /models/download | `{repos?, proxy?, endpoint?}` 启动缺失模型下载，立即返回状态 |
 | POST | /models/cancel | 终止下载子进程，返回当前状态 |
+| GET | /runtime | 推理组件（CUDA PyTorch）安装状态（见 §3.8） |
+| POST | /runtime/install | `{proxy?, mirror?}` 下载并安装运行时，立即返回状态 |
+| POST | /runtime/cancel | 终止安装子进程，返回当前状态 |
 | GET/PUT | /settings | 用户设置 |
 | POST | /jobs | `{paths:[abs,...], auto_correct?}`（缺省 `true`）→ `{jobs:[Job], skipped:[{path, reason}]}` |
 | GET | /jobs | `{jobs:[Job]}`，按创建时间倒序 |
@@ -202,6 +205,21 @@ WS 事件：
 - **完整性判据**：只认推理实际加载的文件与最小字节数（与 `scripts/build-release.ps1` 的模型白名单一致），
   半截文件永远不算就绪。
 - 下载失败只影响模型文件，不改变 `model_state`；错误详情写入 `data/logs/model-download.log` 并在状态中回传尾部。
+
+### 3.8 推理组件（CUDA PyTorch）
+
+安装包**不内置** torch：CUDA 版解压后约 4.9 GB，NSIS 安装器与 GitHub Release 单文件上限都是 2 GB。
+首次使用由应用内下载官方 wheel（torch 2.1.0+cu118 + torchaudio，共约 2.6 GB），再安装到 `runtime/site-packages`。
+
+- `GET /runtime`（与 `/system.runtime_setup` 同形状）：
+  `{state, phase, torch_ready, downloaded_bytes, total_bytes, progress, error, supported}`；
+  `state` ∈ `idle|running|done|error|canceled`，`phase` ∈ `download|install|done`。
+- `POST /runtime/install`：`proxy` 必须是 `http(s)://`；`mirror=true` 优先使用阿里云镜像。
+  wheel 下载到 `runtime/.downloads`，支持 HTTP Range 续传；已完整下载的 wheel 会跳过。
+- 安装通过子进程执行 `pip install --no-deps --no-index --target runtime/site-packages`，
+  **不访问 PyPI**，也不改动用户其它 Python 环境。
+- `POST /runtime/cancel` 直接终止子进程；未完成的 `.part` 文件保留，下次续传。
+- 安装完成后 `torch_ready=true`；CUDA 上下文在引擎进程内初始化，建议重启引擎后再转录。
 
 ## 4. 前端（React 18 + TS + Vite，无 UI 框架）
 

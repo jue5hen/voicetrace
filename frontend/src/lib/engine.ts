@@ -8,6 +8,7 @@ import type {
   ModelState,
   ModelsPresent,
   QueueWire,
+  RuntimeSetupStatus,
   Settings,
   SkippedImport,
   SystemInfo,
@@ -335,6 +336,7 @@ type RawSystem = Record<string, unknown> & {
   models?: unknown;
   models_present?: unknown;
   models_download?: unknown;
+  runtime_setup?: unknown;
   model_state?: unknown;
   sample_rate?: unknown;
   paths?: Record<string, unknown>;
@@ -409,6 +411,33 @@ export function normalizeModelDownload(raw: unknown): ModelDownloadStatus | unde
   };
 }
 
+/** 推理运行时状态归一化：旧引擎没有该字段时返回 undefined。 */
+export function normalizeRuntimeSetup(raw: unknown): RuntimeSetupStatus | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const src = raw as Record<string, unknown>;
+  const state = src.state;
+  if (
+    state !== "idle" &&
+    state !== "running" &&
+    state !== "done" &&
+    state !== "error" &&
+    state !== "canceled"
+  ) {
+    return undefined;
+  }
+  return {
+    state,
+    phase: typeof src.phase === "string" ? src.phase : "idle",
+    torch_ready: src.torch_ready === true,
+    downloaded_bytes:
+      typeof src.downloaded_bytes === "number" ? src.downloaded_bytes : 0,
+    total_bytes: typeof src.total_bytes === "number" ? src.total_bytes : 0,
+    progress: typeof src.progress === "number" ? src.progress : 0,
+    error: typeof src.error === "string" ? src.error : null,
+    supported: src.supported === true,
+  };
+}
+
 /**
  * 真实引擎（FastAPI）与 SPEC 的字段形态存在差异：
  * - model_state 是模型加载状态（idle/loading/ready/failed）
@@ -460,6 +489,7 @@ export function normalizeSystem(input: unknown): SystemInfo {
     model_state: normalizeModelState(raw.model_state),
     models_present: normalizeModelsPresent(raw.models_present),
     models_download: normalizeModelDownload(raw.models_download),
+    runtime_setup: normalizeRuntimeSetup(raw.runtime_setup),
     sample_rate: typeof raw.sample_rate === "number" ? raw.sample_rate : undefined,
     error: typeof raw.error === "string" ? raw.error : null,
     models,
@@ -564,6 +594,15 @@ export const api = {
     }),
   cancelModelDownload: () =>
     request<ModelDownloadStatus>("/models/cancel", { method: "POST" }),
+  runtime: () => request<RuntimeSetupStatus>("/runtime", { timeoutMs: 10_000 }),
+  installRuntime: (body: { proxy?: string; mirror?: boolean }) =>
+    request<RuntimeSetupStatus>("/runtime/install", {
+      method: "POST",
+      body,
+      timeoutMs: 20_000,
+    }),
+  cancelRuntime: () =>
+    request<RuntimeSetupStatus>("/runtime/cancel", { method: "POST" }),
   jobs: () => request<{ jobs: Job[] }>("/jobs"),
   job: (id: string) => request<Job>(`/jobs/${encodeURIComponent(id)}`),
   /**

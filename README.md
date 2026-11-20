@@ -18,12 +18,22 @@ Windows 本地视频 / 音频转字幕工作台：词级时间轴、逐句校对
 
 - Windows 10/11 x64（仅在 Windows 11 + RTX 4060 上实测）
 - 可选 NVIDIA GPU；CPU 推理可用但明显更慢
-- 首次使用需下载约 5.2 GB 开源模型（应用内「设置 → 离线模型」）
+- 首次使用需在应用内下载两块内容：
+  - 推理组件（CUDA 版 PyTorch，约 2.6 GB，设置 → 推理组件）
+  - 离线模型（约 5.2 GB，设置 → 离线模型）
 
 从源码构建还需要：Node.js 24 + pnpm 11、Python 3.11、Rust stable、Microsoft Edge WebView2 Runtime、
 `ffmpeg.exe` / `ffprobe.exe`（或设置环境变量 `VT_FFMPEG` 指向其目录）。
 
-## 模型
+## 模型与推理组件
+
+安装包只带应用壳、引擎和基础 Python 运行时，**不含 torch 与模型**（两者合计约 7.7 GB，超出安装器上限）。
+首次启动后到「设置」完成两步：
+
+1. **推理组件**：下载 CUDA 版 PyTorch（torch 2.1.0+cu118 + torchaudio，约 2.6 GB），支持官方源 / 阿里云镜像与本地代理。
+2. **离线模型**：下载三个 FireRedASR2S 权重（约 5.2 GB），支持 `hf-mirror.com` 镜像与本地代理。
+
+两步都支持取消与续传。完成后重启引擎即可离线转录。
 
 三个模型均来自 [FireRedASR2S](https://github.com/FireRedTeam/FireRedASR2S) 的开源权重：
 
@@ -33,17 +43,12 @@ Windows 本地视频 / 音频转字幕工作台：词级时间轴、逐句校对
 | `models/vad` | `FireRedTeam/FireRedVAD` | 语音活动检测 |
 | `models/punc` | `FireRedTeam/FireRedPunc` | 标点恢复 |
 
-两种下载方式，任选其一：
-
-1. 启动应用 → 设置 → 离线模型 → 下载缺失模型（支持 `hf-mirror.com` 镜像与本地代理）。
-2. 命令行：
+命令行方式（开发环境）：
 
 ```powershell
 cd engine
 .\.venv\Scripts\python.exe -m voicetrace_engine.model_download --models-dir models
 ```
-
-下载完成后 `models/{aed,vad,punc}` 齐备即可离线使用。
 
 ## 开发
 
