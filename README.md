@@ -85,13 +85,22 @@ cd frontend
 pnpm install
 pnpm build
 
-# Tauri 壳（生成 NSIS 安装器）
-cd ..\app
-pnpm install
-pnpm run build:installer
+# Tauri 壳（GNU 工具链；PATH 需含 mingw64\bin，windres 编译清单用）
+cd ..\app\src-tauri
+cargo build --release --features custom-protocol
 ```
 
-壳的产物在 `app/src-tauri/target/release/`，NSIS 安装器在 `app/src-tauri/target/release/bundle/nsis/`。
+壳的产物在 `app/src-tauri/target/release/`（`voicetrace.exe` + `WebView2Loader.dll`）。
+注意：`pnpm run build:installer`（tauri build）只产**不含引擎/运行时**的 NSIS 壳，不是交付物。
+
+**完整安装包**（含引擎与基础 Python 运行时，不含 torch 与模型）由 `scripts/build-installer.ps1`
+组装并调 NSIS 构建，脚本为 `scripts/installer.nsi`：
+
+- 需要本机有一份现成便携布局可复用运行时（`-RuntimeSource`，默认 `D:\VoiceTrace`，
+  即已安装的本应用；全新机器先用 `scripts/build-release.ps1` 生成）。
+- 需要 NSIS 3.x（`makensis.exe`，Tauri 缓存自带：`%LOCALAPPDATA%\tauri\NSIS`）。
+- 产物 `VoiceTrace_<版本>_x64-setup.exe`：per-user 安装，支持**覆盖升级**——
+  从注册表定位既有安装目录，只覆盖程序本体，已下载的模型、用户数据与 torch 原地保留。
 
 免安装的完整便携目录（含 Python 引擎、模型与 ffmpeg 运行时）由 `scripts/build-release.ps1` 组装，
 需要本机具备 Python 3.11 运行时与 ffmpeg，产物体积约 10 GB。
@@ -122,7 +131,7 @@ cargo test
 | `frontend/` | React 18 + Vite + TS 前端 |
 | `engine/` | Python 引擎（FastAPI）；`models/` 与 `.venv/` 不入库 |
 | `engine/third_party/FireRedASR2S/` | 上游推理代码（Apache-2.0，含本地补丁） |
-| `scripts/` | `build-release.ps1`、`dev.ps1`、模型下载等 |
+| `scripts/` | `build-release.ps1`（便携包）、`installer.nsi` + `build-installer.ps1`（安装包）、`dev.ps1`、模型下载等 |
 | `docs/` | `SPEC.md` 协议契约、`VERIFY.md` 验收清单、审计报告 |
 | `assets/` | 应用图标 |
 
