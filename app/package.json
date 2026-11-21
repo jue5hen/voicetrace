@@ -1,7 +1,7 @@
 {
   "name": "voicetrace-app",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "声迹 VoiceTrace Tauri 桌面壳（便携交付走 #source/scripts/build-release.ps1；build:installer 仅用于 NSIS 安装包，tauri.conf.json 无 beforeBuildCommand，跑之前须先手动构建 ../frontend 的 dist，否则会拿旧 dist 打包）",
   "scripts": {
     "tauri": "tauri",

@@ -20,6 +20,7 @@ and the exported SRT drifting apart.
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 from typing import Iterable
 
 from .textutil import (
@@ -150,8 +151,16 @@ def _piece(text: str, c0: int, c1: int, ctimes: list[tuple[str, int, int]]) -> d
     }
 
 
+@lru_cache(maxsize=2048)
+def _content_offsets_cached(text: str) -> tuple[int, ...]:
+    return tuple(i for i, ch in enumerate(text) if is_content(ch))
+
+
 def _content_offsets(text: str) -> list[int]:
-    return [i for i, ch in enumerate(text) if is_content(ch)]
+    # 同一片文本在 _split_piece / _choose_boundary / _group_words 里被反复
+    # 求偏移；缓存命中后只剩一次 C 级 list 拷贝。返回新列表，调用方怎么改
+    # 都不会污染缓存。
+    return list(_content_offsets_cached(text))
 
 
 # Characters that may sit *inside* one latin word (don't -> don't).
@@ -213,19 +222,29 @@ def _group_words(
     return words
 
 
-def _word_boundaries(text: str) -> set[int]:
-    """Local content-character boundaries that coincide with a jieba word."""
+@lru_cache(maxsize=2048)
+def _word_boundaries(text: str) -> frozenset[int]:
+    """Local content-character boundaries that coincide with a jieba word.
+
+    性能修复（长单句拆分 O(n³) 的主要来源）：
+    * 旧实现在循环里对每个字符重算 len(content_text(text))，单次调用 O(n²)；
+      总字数提出循环后降为 O(n)。
+    * _split_piece 对同一片文本要做 k-1 次边界选择，每次都重新扫描；按文本
+      缓存后重复调用 O(1)。
+    返回 frozenset：调用方只做成员判断，也防止误改缓存。
+    """
     ends = word_ends(text)
     if not ends:
-        return set()
+        return frozenset()
+    total = len(content_text(text))
     boundaries: set[int] = set()
     count = 0
     for i, ch in enumerate(text):
         if is_content(ch):
             count += 1
-        if i + 1 in ends and 0 < count < len(content_text(text)):
+        if i + 1 in ends and 0 < count < total:
             boundaries.add(count)
-    return boundaries
+    return frozenset(boundaries)
 
 
 def _choose_boundary(

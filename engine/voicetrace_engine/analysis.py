@@ -176,9 +176,11 @@ def find_suspicious(sentences: list[dict], min_count: int = 3,
     texts: dict[int, str] = {}
 
     for s in sentences:
-        sid = s["id"]
+        sid = s.get("id")
         text = s.get("text") or ""
-        if not text:
+        # 损坏/旧版转录里可能有没有 id 的句子：跳过而不是 KeyError 把整个
+        # 分析（连带每次保存/编辑）打成 500。
+        if sid is None or not text:
             continue
         texts[sid] = text
         for start, end, gram in _iter_ngrams(text):
@@ -316,6 +318,8 @@ def _prefix_stutter_positions(content: str) -> set[int]:
 def find_repeats(sentences: list[dict], max_block: int = 6) -> list[dict]:
     issues: list[dict] = []
     for s in sentences:
+        if s.get("id") is None:
+            continue  # 同 find_suspicious：无 id 的损坏句不参与分析
         text = s.get("text") or ""
         if not text:
             continue
@@ -456,6 +460,8 @@ def analyze(transcript: dict[str, Any], settings: dict[str, Any] | None = None,
 
     if include_lowconf:
         for s in sentences:
+            if s.get("id") is None:
+                continue
             conf = s.get("conf")
             raw = s.get("text") or ""
             # SPEC §3.3：句级 conf<0.55 整句报 lowconf，无长度门槛；start/end 是

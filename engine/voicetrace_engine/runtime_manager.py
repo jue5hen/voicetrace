@@ -104,68 +104,66 @@ class RuntimeManager:
 
     # ---------------------------------------------------------------- actions
     def start(self, proxy: str = "", mirror: bool = False) -> dict[str, Any]:
+        # check→spawn→adopt 整体原子（同 downloader）：并发"安装"请求不能
+        # 各拉一个 pip 子进程写同一个 site-packages。
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 return self.status()
 
-        if self._ready():
-            with self._lock:
+            if self._ready():
                 self._state = "done"
                 self._phase = "done"
                 self._error = None
                 self._finished_at = time.time()
-            return self.status()
+                return self.status()
 
-        if self.site_packages is None or self.download_dir is None:
-            with self._lock:
+            if self.site_packages is None or self.download_dir is None:
                 self._state = "error"
                 self._error = "当前是源码开发模式，请直接用 pip 安装 requirements.txt"
-            return self.status()
+                return self.status()
 
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        log = self.log_path.open("a", encoding="utf-8", errors="replace")
-        log.write(
-            f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} runtime install "
-            f"proxy={proxy or '-'} mirror={int(mirror)} ===\n"
-        )
-        log.flush()
-
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = str(self.engine_root) + (os.pathsep + existing if existing else "")
-        cmd = [
-            sys.executable,
-            "-m",
-            "voicetrace_engine.runtime_setup",
-            "--site-packages",
-            str(self.site_packages),
-            "--download-dir",
-            str(self.download_dir),
-        ]
-        if proxy:
-            cmd += ["--proxy", proxy]
-        if mirror:
-            cmd.append("--mirror")
-
-        creationflags = _CREATE_NO_WINDOW if os.name == "nt" else 0
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(self.engine_root),
-                env=env,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                creationflags=creationflags,
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            log = self.log_path.open("a", encoding="utf-8", errors="replace")
+            log.write(
+                f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} runtime install "
+                f"proxy={proxy or '-'} mirror={int(mirror)} ===\n"
             )
-        except OSError as exc:
-            log.close()
-            with self._lock:
+            log.flush()
+
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            existing = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = str(self.engine_root) + (os.pathsep + existing if existing else "")
+            cmd = [
+                sys.executable,
+                "-m",
+                "voicetrace_engine.runtime_setup",
+                "--site-packages",
+                str(self.site_packages),
+                "--download-dir",
+                str(self.download_dir),
+            ]
+            if proxy:
+                cmd += ["--proxy", proxy]
+            if mirror:
+                cmd.append("--mirror")
+
+            creationflags = _CREATE_NO_WINDOW if os.name == "nt" else 0
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(self.engine_root),
+                    env=env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    creationflags=creationflags,
+                )
+            except OSError as exc:
+                log.close()
                 self._state = "error"
                 self._error = f"无法启动安装进程：{exc}"
-            return self.status()
+                return self.status()
 
-        with self._lock:
             self._proc = proc
             self._cancel_requested = False
             self._state = "running"
@@ -174,9 +172,9 @@ class RuntimeManager:
             self._started_at = time.time()
             self._finished_at = 0.0
 
-        self._thread = threading.Thread(target=self._monitor, args=(proc, log), daemon=True)
-        self._thread.start()
-        return self.status()
+            self._thread = threading.Thread(target=self._monitor, args=(proc, log), daemon=True)
+            self._thread.start()
+            return self.status()
 
     def cancel(self) -> dict[str, Any]:
         with self._lock:
@@ -202,8 +200,12 @@ class RuntimeManager:
                     if torch_dir.is_dir():
                         phase = "install"
                         with self._lock:
+                            if self._proc is not proc:
+                                return  # 已被新一轮安装接管
                             self._phase = "install"
                 with self._lock:
+                    if self._proc is not proc:
+                        return
                     if self._phase != phase:
                         self._phase = phase
         finally:
@@ -214,6 +216,9 @@ class RuntimeManager:
 
         code = proc.poll()
         with self._lock:
+            # 同 downloader：旧监视线程不得覆盖新一轮安装的状态。
+            if self._proc is not proc:
+                return
             canceled = self._cancel_requested
             if canceled:
                 self._state = "canceled"

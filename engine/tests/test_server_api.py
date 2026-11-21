@@ -312,7 +312,11 @@ class AuthAndEnvelopeTest(EngineServerTest):
 
 class SystemPayloadTest(EngineServerTest):
     def test_system_shape(self):
-        status, data, _raw = self.request("GET", "/api/system")
+        # 夹具的 models 目录是空的（测试不可能放几 GB 真模型），而
+        # models_present 按文件就绪检查：本用例只验证 payload 结构与接线，
+        # 把文件检查桩成就绪。旧实现断言全 True 却不给桩，出厂即失败。
+        with mock.patch.object(engine_server, "is_model_ready", return_value=True):
+            status, data, _raw = self.request("GET", "/api/system")
         self.assertEqual(status, 200)
         self.assertEqual(data["model_state"], "ready")
         self.assertEqual(data["models_present"],

@@ -112,68 +112,68 @@ class DownloadManager:
         proxy: str = "",
         endpoint: str = "",
     ) -> dict[str, Any]:
+        # check→spawn→adopt 必须整体原子：旧实现只在开头查一次"是否在跑"，
+        # 随后释放锁去 Popen——两个并发的"下载"请求会一起通过检查、各拉一个
+        # 子进程写同一个 models 目录。RLock 允许内部再调 status()。
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 return self.status()
 
-        requested = [key for key in (repos or DEFAULT_ORDER) if key in REPOS]
-        if not requested:
-            requested = list(DEFAULT_ORDER)
-        missing = [key for key in requested if not is_model_ready(self.models_dir, key)]
+            requested = [key for key in (repos or DEFAULT_ORDER) if key in REPOS]
+            if not requested:
+                requested = list(DEFAULT_ORDER)
+            missing = [key for key in requested if not is_model_ready(self.models_dir, key)]
 
-        if not missing:
-            with self._lock:
+            if not missing:
                 self._state = "done"
                 self._error = None
                 self._current = None
                 self._repos = []
                 self._finished_at = time.time()
-            return self.status()
+                return self.status()
 
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        log = self.log_path.open("a", encoding="utf-8", errors="replace")
-        log.write(
-            f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} download "
-            f"{','.join(missing)} proxy={proxy or '-'} endpoint={endpoint or '-'} ===\n"
-        )
-        log.flush()
-
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        existing = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = str(self.engine_root) + (os.pathsep + existing if existing else "")
-        cmd = [
-            sys.executable,
-            "-m",
-            "voicetrace_engine.model_download",
-            "--models-dir",
-            str(self.models_dir),
-            "--repos",
-            ",".join(missing),
-        ]
-        if proxy:
-            cmd += ["--proxy", proxy]
-        if endpoint:
-            cmd += ["--endpoint", endpoint]
-
-        creationflags = _CREATE_NO_WINDOW if os.name == "nt" else 0
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(self.engine_root),
-                env=env,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                creationflags=creationflags,
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            log = self.log_path.open("a", encoding="utf-8", errors="replace")
+            log.write(
+                f"\n=== {time.strftime('%Y-%m-%d %H:%M:%S')} download "
+                f"{','.join(missing)} proxy={proxy or '-'} endpoint={endpoint or '-'} ===\n"
             )
-        except OSError as exc:
-            log.close()
-            with self._lock:
+            log.flush()
+
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            existing = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = str(self.engine_root) + (os.pathsep + existing if existing else "")
+            cmd = [
+                sys.executable,
+                "-m",
+                "voicetrace_engine.model_download",
+                "--models-dir",
+                str(self.models_dir),
+                "--repos",
+                ",".join(missing),
+            ]
+            if proxy:
+                cmd += ["--proxy", proxy]
+            if endpoint:
+                cmd += ["--endpoint", endpoint]
+
+            creationflags = _CREATE_NO_WINDOW if os.name == "nt" else 0
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(self.engine_root),
+                    env=env,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    creationflags=creationflags,
+                )
+            except OSError as exc:
+                log.close()
                 self._state = "error"
                 self._error = f"无法启动下载进程：{exc}"
-            return self.status()
+                return self.status()
 
-        with self._lock:
             self._proc = proc
             self._cancel_requested = False
             self._state = "running"
@@ -183,9 +183,9 @@ class DownloadManager:
             self._started_at = time.time()
             self._finished_at = 0.0
 
-        self._thread = threading.Thread(target=self._monitor, args=(proc, log), daemon=True)
-        self._thread.start()
-        return self.status()
+            self._thread = threading.Thread(target=self._monitor, args=(proc, log), daemon=True)
+            self._thread.start()
+            return self.status()
 
     def cancel(self) -> dict[str, Any]:
         with self._lock:
@@ -207,12 +207,16 @@ class DownloadManager:
             while proc.poll() is None:
                 time.sleep(1.0)
                 with self._lock:
+                    if self._proc is not proc:
+                        return  # 状态槽已属于新一轮下载，旧监视线程就此退场
                     repos = list(self._repos)
                 current = next(
                     (key for key in repos if not is_model_ready(self.models_dir, key)),
                     None,
                 )
                 with self._lock:
+                    if self._proc is not proc:
+                        return
                     self._current = current
             code = proc.poll()
         finally:
@@ -222,6 +226,11 @@ class DownloadManager:
                 pass
 
         with self._lock:
+            # 旧进程的监视线程可能在新一轮 start() 之后才醒来：状态槽已经
+            # 属于新进程，旧结果绝不能覆盖回去（否则"下载中"会被写成上一轮
+            # 的 done/error，进度与按钮状态全部错乱）。
+            if self._proc is not proc:
+                return
             canceled = self._cancel_requested
             self._state = "canceled" if canceled else ("done" if code == 0 else "error")
             if self._state == "error":

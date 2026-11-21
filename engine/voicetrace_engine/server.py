@@ -168,8 +168,15 @@ def unique_export_path(base_dir: Path, name: str) -> Path:
     return Path(base_dir) / f"{stem} ({time.time_ns()}){ext}"
 
 
-def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> Path:
-    """Write through a sibling temp file + os.replace (never half-written)."""
+def atomic_write_text(path: Path, text: str, encoding: str = "utf-8",
+                      *, exclusive: bool = False) -> Path:
+    """Write through a sibling temp file + os.replace (never half-written).
+
+    exclusive=True 额外保证目标此前不存在：用硬链接把临时文件原子地"占位"
+    到目标名（NTFS 上 create-if-absent），而不是 os.replace 直接覆盖。两个
+    并发导出再也不会静默覆盖彼此（TOCTOU）。不支持硬链接的文件系统
+    （exFAT/FAT32 U 盘）退回普通 replace 行为。竞争失败抛 FileExistsError。
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
@@ -179,7 +186,21 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> Path:
     try:
         with os.fdopen(fd, "w", encoding=encoding) as handle:
             handle.write(text)
-        os.replace(tmp, path)
+        if exclusive:
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                raise
+            except OSError:
+                # 文件系统不支持硬链接：保持旧行为，尽力而为。
+                os.replace(tmp, path)
+            else:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+        else:
+            os.replace(tmp, path)
     finally:
         try:
             if tmp.exists():
@@ -187,6 +208,21 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> Path:
         except OSError:
             pass
     return path
+
+
+def write_export_file(out: Path, content: str, encoding: str, base_name: str) -> Path:
+    """Write one auto-named export, never clobbering an existing file.
+
+    unique_export_path() 只"检查"同名是否存在；检查与写入之间另一个导出
+    可能刚好落盘（自动导出 + 手动导出并发、双击导出按钮）。这里用排他写
+    原子占位，竞争失败就顺延到下一个空闲名字重试。
+    """
+    for _ in range(32):
+        try:
+            return atomic_write_text(out, content, encoding, exclusive=True)
+        except FileExistsError:
+            out = unique_export_path(out.parent, base_name)
+    raise FileExistsError(f"导出重名次数过多：{out}")
 
 
 def thumb_file(thumb_dir: Path, job_id: str) -> Path:
@@ -649,7 +685,7 @@ class Worker(threading.Thread):
                 continue
             seen.add(out)
             try:
-                atomic_write_text(out, content, "utf-8-sig")
+                out = write_export_file(out, content, "utf-8-sig", name)
             except OSError as e:
                 log.warning("auto export failed: %s (%s)", out, e)
                 continue
@@ -1131,7 +1167,10 @@ def build_app(state: State) -> FastAPI:
                 raise HTTPException(404, "任务不存在")
             state.cancel_requested.add(job_id)
             if job["status"] == "queued":
-                state.store.update_job(job_id, status="canceled", stage="done",
+                # SPEC §3.1：终态 stage 与 status 一致。流水线取消写
+                # stage="canceled"，排队取消也必须写 canceled——旧实现写
+                # "done"，按 stage 渲染的界面会把已取消任务画成已完成。
+                state.store.update_job(job_id, status="canceled", stage="canceled",
                                        finished_at=now_iso())
             elif job["status"] == "processing":
                 state.worker.cancel(job_id)
@@ -1180,7 +1219,7 @@ def build_app(state: State) -> FastAPI:
             transcript = state.load_transcript(job_id)
             check_version(transcript, body.expected_version)
             sentence = next((s for s in transcript.get("sentences") or []
-                             if s["id"] == sid), None)
+                             if s.get("id") == sid), None)
             if sentence is None:
                 raise HTTPException(404, "句子不存在")
             state.store.push_history(job_id,
@@ -1275,11 +1314,17 @@ def build_app(state: State) -> FastAPI:
         # happened to sit at data/exports/<same name>.srt.
         fallback = unique_export_path(state.paths.data_dir / "exports", requested.name)
         candidates = [requested, fallback]
+        # 显式路径是用户自己选的，允许覆盖；自动命名的导出绝不覆盖——包括
+        # "检查同名→写入"之间被另一个导出抢注的 TOCTOU 竞态。
+        auto_named = not body.path
         last_error: OSError | None = None
         for index, out in enumerate(candidates):
             try:
-                # temp file + os.replace: a crash never leaves a truncated srt
-                atomic_write_text(out, content, enc)
+                # temp file + 原子落盘：崩溃不会留下半截 srt
+                if auto_named:
+                    out = write_export_file(out, content, enc, requested.name)
+                else:
+                    atomic_write_text(out, content, enc)
                 return {
                     "path": str(out),
                     "fallback": index > 0,
@@ -1443,10 +1488,25 @@ def _watch_parent(pid: int, server: uvicorn.Server | None = None) -> None:
     WAL never checkpointed); setting should_exit lets the main thread run the
     normal shutdown path instead.
     """
+    if os.name != "nt":
+        # 看门狗只在 Windows 有意义（壳也只在 Windows 传 --parent-pid）。
+        # 旧实现在其他平台直接 ctypes.windll 抛 AttributeError，线程静默死掉。
+        return
     import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.windll.kernel32
+    # HANDLE 是指针宽度：ctypes 默认 restype=c_int 会把 64 位句柄截断/符号
+    # 扩展，x64 上句柄值一旦超过 2^31 就会拿错句柄去 Wait/Close。显式声明
+    # 原型，与壳侧 win32.rs 的 isize 约定保持一致。
+    kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
 
     SYNCHRONIZE = 0x00100000
-    kernel32 = ctypes.windll.kernel32
     handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
     if not handle:
         # No handle means no watchdog at all: say so instead of failing quiet.
@@ -1520,6 +1580,14 @@ def shutdown(state: State, port_file: Path | None = None) -> None:
         # Cancelling through the pipeline also kills the ffmpeg child that
         # owns the current wav (media.py watches this event).
         state.pipeline.cancel_all()
+        # 模型下载 / 运行时安装子进程不属于流水线，cancel_all 收不到它们。
+        # 有壳时 Job Object 会兜底，但独立运行（开发/看门狗退出）时不主动
+        # 终止就会留下孤儿进程继续写 models/runtime。
+        for manager in (state.models, state.runtime_setup):
+            try:
+                manager.cancel()
+            except Exception:  # noqa: BLE001 - 退出路径不能因清理失败而中断
+                log.warning("stopping a background download failed", exc_info=True)
         if state.worker.is_alive():
             state.worker.join(timeout=5.0)
         if state.worker.is_alive():
